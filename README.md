@@ -35,7 +35,42 @@ Every field a component declares carries a `DatapointMetadata` next to its
 address: the parameter ID the ECL manual prints, the value domain the
 controller accepts, the unit, and whether the value may be written. Consumers
 can use it to build user interfaces without hard-coding a second copy of the
-register map.
+register map. A setting with an "off" value outside its range - the
+disinfection temperature stores `9` for `OFF` - names it in `off_value`.
+
+## Applications
+
+An ECL controller runs one *application* (A237.1, A337.2, ...), and the
+application decides which parameters it has; a parameter it lacks is refused
+over Modbus. `ecl310_modbus.applications` carries a profile per application
+and version - every parameter, with type, scale, range, default and whether it
+may be written:
+
+```python
+from ecl310_modbus import PROFILES, Ecl310
+
+detection = await Ecl310.async_detect_application(unit)
+profile = detection.application or PROFILES["a237_1_v04"]
+device = Ecl310(unit, application=profile)
+device.supports("heating", "return_limit")  # False on A337.2
+device.info.application                     # "A337.2 V02"
+```
+
+With a profile, the device reads only the parameters the application has.
+Detection reads a handful of parameters that tell the known applications apart
+and ranks the profiles by how many answers each predicts wrongly.
+
+| Profile | Application | Version |
+| :------ | :---------- | :------ |
+| `a237_1_v04` | A237.1 | V04 |
+| `a337_2_v02` | A337.2 | V02 |
+
+The profiles are generated from the reports in Danfoss' ECL Tool - only the
+derived parameter metadata, not the reports themselves:
+
+```sh
+scripts/import-ecl-tool "ECL Tool.zip" "A237_1 V04" "A337_2 V02"
+```
 
 ## Verified against
 

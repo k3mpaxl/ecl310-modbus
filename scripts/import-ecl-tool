@@ -1,0 +1,224 @@
+#!/usr/bin/env python3
+"""Turn Danfoss ECL Tool application reports into application profiles.
+
+The ECL Tool ships one XML report per application and version - every
+parameter the application has, with its data type, scale, unit, range,
+default and whether it may be written. This script reads the reports for the
+applications named on the command line and writes one compact Python module
+per report to ``src/ecl310_modbus/applications``, then regenerates the
+catalogue next to them. Only the derived parameter metadata ends up in the
+library, never the report itself.
+
+Usage::
+
+    scripts/import-ecl-tool "ECL Tool.zip" "A237_1 V04" "A337_2 V02"
+
+The first argument is the ECL Tool zip or its unpacked folder; the others name
+reports as they are called inside it (``Reports/<name>.xml``). Run it again
+with no report names to only rebuild the catalogue.
+
+The reports come from outside this repository: they are read straight out of
+the zip, never unpacked, and only their attributes are used.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import re
+import sys
+import zipfile
+from dataclasses import dataclass
+from pathlib import Path
+from xml.etree import ElementTree as ET
+
+ROOT = Path(__file__).resolve().parent.parent
+TARGET = ROOT / "src" / "ecl310_modbus" / "applications"
+NAMESPACE = "{schema.danfoss.com/ecl}"
+
+#: Values a parameter stores to mean "off", one step outside its settable
+#: range and shown as ``OFF`` on the controller. The reports do not mark them,
+#: so they are kept here, by parameter number, as they become known.
+OFF_VALUES: dict[int, int] = {
+    12125: 9,  # anti-bacteria desired temperature: 9 = OFF
+}
+
+REPORT_NAME = re.compile(r"^(?P<app>[A-Z]\d+)(?:_(?P<sub>\d+))? V(?P<ver>\d+)$")
+PROFILE_MODULE = re.compile(r"^[a-z]\d+(?:_\d+)?_v\d+$")
+LINE_LENGTH = 88
+
+
+@dataclass(frozen=True)
+class Parameter:
+    """One row of a report, as the profile stores it."""
+
+    pnu: int
+    group: str
+    name: str
+    type: str
+    scale: int
+    unit: str | None
+    minimum: int | None
+    maximum: int | None
+    default: int | None
+    writable: bool
+
+
+def _literal(value: object) -> str:
+    """Write a value as Python source, strings double-quoted."""
+    if isinstance(value, str):
+        return json.dumps(value, ensure_ascii=False)
+    return repr(value)
+
+
+def _int(value: str | None) -> int | None:
+    return None if value in (None, "") else int(value)
+
+
+def read_report(source: Path, name: str) -> tuple[ET.Element, str]:
+    """Return the parsed report ``name`` from the ECL Tool zip or folder."""
+    member = f"Reports/{name}.xml"
+    if source.is_dir():
+        raw = (source / member).read_bytes()
+    else:
+        with zipfile.ZipFile(source) as archive:
+            matches = [n for n in archive.namelist() if n.endswith(member)]
+            if len(matches) != 1:
+                sys.exit(f"{member} not found in {source}")
+            raw = archive.read(matches[0])
+    return ET.fromstring(raw.decode("utf-16")), member
+
+
+def parameters(root: ET.Element) -> list[Parameter]:
+    """Every parameter in a report, once each, by parameter number."""
+    found: dict[int, Parameter] = {}
+    for group in root.iter(f"{NAMESPACE}Group"):
+        group_name = (group.text or "").strip()
+        for param in group.iter(f"{NAMESPACE}Param"):
+            attrs = param.attrib
+            if "Min" not in attrs or "Max" not in attrs:
+                continue  # an alarm, not a setting or reading
+            pnu = int(attrs["PNU"])
+            found.setdefault(
+                pnu,
+                Parameter(
+                    pnu=pnu,
+                    group=group_name,
+                    name=(param.text or "").strip(),
+                    type=attrs["Type"],
+                    scale=int(attrs.get("Scale") or 1),
+                    unit=attrs.get("Unit") or None,
+                    minimum=_int(attrs.get("Min")),
+                    maximum=_int(attrs.get("Max")),
+                    default=_int(attrs.get("Default_val")),
+                    writable=attrs.get("Writable") == "TRUE",
+                ),
+            )
+    return sorted(found.values(), key=lambda p: p.pnu)
+
+
+def module_text(name: str, root: ET.Element, member: str) -> tuple[str, str]:
+    """Return the profile module's name and source for report ``name``."""
+    match = REPORT_NAME.match(name)
+    if match is None:
+        sys.exit(f"Cannot read an application and version from {name!r}")
+    app = match["app"] + (f".{match['sub']}" if match["sub"] else "")
+    version = int(match["ver"])
+    device = root.find(f"{NAMESPACE}Device_App")
+    if device is None:
+        sys.exit(f"{member} has no Device_App")
+    ecl_types = tuple(
+        int(t.text) for t in device.iter(f"{NAMESPACE}ValidECL_Type") if t.text
+    )
+    key = f"{app.replace('.', '_').lower()}_v{version:02d}"
+
+    lines = [
+        f'"""{app} V{version:02d}: the parameters of this ECL application.',
+        "",
+        "Generated by ``scripts/import-ecl-tool`` from the Danfoss ECL Tool report",
+        f"``{member}``. Do not edit by hand - run the script again.",
+        '"""',
+        "",
+        "from .profile import ApplicationProfile, Parameter",
+        "",
+        "PROFILE = ApplicationProfile(",
+        f'    key="{key}",',
+        f'    application="{app}",',
+        f"    version={version},",
+        f"    ecl_types={ecl_types!r},",
+        "    parameters={",
+    ]
+    for p in parameters(root):
+        off = OFF_VALUES.get(p.pnu)
+        fields = [
+            _literal(p.group),
+            _literal(p.name),
+            _literal(p.type),
+            str(p.scale),
+            _literal(p.unit),
+            _literal(p.minimum),
+            _literal(p.maximum),
+            _literal(p.default),
+            _literal(p.writable),
+        ]
+        if off is not None:
+            fields.append(f"off={off}")
+        # Laid out the way the formatter would, so the output passes as is.
+        arguments = ", ".join(fields)
+        line = f"        {p.pnu}: Parameter({arguments}),"
+        if len(line) <= LINE_LENGTH:
+            lines.append(line)
+        elif len(f"            {arguments}") <= LINE_LENGTH:
+            lines += [
+                f"        {p.pnu}: Parameter(",
+                f"            {arguments}",
+                "        ),",
+            ]
+        else:
+            lines.append(f"        {p.pnu}: Parameter(")
+            lines.extend(f"            {field}," for field in fields)
+            lines.append("        ),")
+    lines += ["    },", ")", ""]
+    return key, "\n".join(lines)
+
+
+def write_catalogue() -> None:
+    """List every profile module in the package's catalogue."""
+    keys = sorted(
+        path.stem for path in TARGET.glob("*.py") if PROFILE_MODULE.match(path.stem)
+    )
+    lines = [
+        '"""Every application profile this library carries.',
+        "",
+        "Generated by ``scripts/import-ecl-tool``. Do not edit by hand.",
+        '"""',
+        "",
+        *(f"from .{key} import PROFILE as {key.upper()}" for key in keys),
+        "from .profile import ApplicationProfile",
+        "",
+        "#: The profiles, by key.",
+        "PROFILES: dict[str, ApplicationProfile] = {",
+        *(f"    {key.upper()}.key: {key.upper()}," for key in keys),
+        "}",
+        "",
+    ]
+    (TARGET / "catalog.py").write_text("\n".join(lines), encoding="utf-8")
+
+
+def main() -> None:
+    """Import the named reports and rebuild the catalogue."""
+    parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+    parser.add_argument("source", type=Path, help="ECL Tool zip or folder")
+    parser.add_argument("reports", nargs="*", help='report names, e.g. "A237_1 V04"')
+    args = parser.parse_args()
+    for name in args.reports:
+        root, member = read_report(args.source, name)
+        key, text = module_text(name, root, member)
+        (TARGET / f"{key}.py").write_text(text, encoding="utf-8")
+        print(f"wrote {key}.py")
+    write_catalogue()
+    print("wrote catalog.py")
+
+
+if __name__ == "__main__":
+    main()

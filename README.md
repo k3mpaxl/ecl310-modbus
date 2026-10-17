@@ -75,7 +75,7 @@ system.application_title   # "A237.1 V04"   PNU 2060-2063
 system.software            # "1.56"         PNU 35 (build in PNU 8)
 system.hardware            # "H.3"          PNU 34
 system.code_number         # "087H3040"     PNU 19
-system.serial_number       # "210933"       PNU 36-37
+system.serial_number       # "66069"        PNU 36-37
 system.production          # (2017, 12)     PNU 2099, year and week
 device.info                # the same, for a device registry
 ```

@@ -57,8 +57,31 @@ device.info.application                     # "A337.2 V02"
 ```
 
 With a profile, the device reads only the parameters the application has.
-Detection reads a handful of parameters that tell the known applications apart
-and ranks the profiles by how many answers each predicts wrongly.
+
+Detection first asks the controller: it reports its application in PNU
+2060-2063 (`detection.reported`, e.g. `"A237.1 V04"`). A controller that reports
+an application without a profile here gets `detection.application is None`.
+Only a controller that reports nothing is probed: a handful of parameters that
+tell the known applications apart are read one by one, and the profiles are
+ranked by how many answers each predicts wrongly.
+
+## Identity
+
+The controller reports what it is (Danfoss VI.LG.V5.02, §6.12):
+
+```python
+system = await device.async_read_system_information()
+system.application_title   # "A237.1 V04"   PNU 2060-2063
+system.software            # "1.56"         PNU 35 (build in PNU 8)
+system.hardware            # "H.3"          PNU 34
+system.code_number         # "087H3040"     PNU 19
+system.serial_number       # "210933"       PNU 36-37
+system.production          # (2017, 12)     PNU 2099, year and week
+device.info                # the same, for a device registry
+```
+
+It is read once and not polled, because none of it changes while the controller
+runs. `Ecl310.async_probe()` reads it too.
 
 | Profile | Application | Version |
 | :------ | :---------- | :------ |

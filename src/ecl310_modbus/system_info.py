@@ -7,7 +7,7 @@ The ECL keeps its identity in a few system parameters, described in Danfoss'
     PNU 19         code number, after "087H"      3040  -> 087H3040
     PNU 34         hardware: letter, number       0x4803 -> H.3
     PNU 35         software: major, minor         0x0138 -> 1.56
-    PNU 36, 37     serial number, high and low    3, 14325 -> 210933
+    PNU 36, 37     serial number, high and low    1, 0x0215 -> 66069
     PNU 2060       application prefix (a letter)  65 -> A
     PNU 2061       application type number        237
     PNU 2062       application sub number         1

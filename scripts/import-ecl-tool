@@ -24,8 +24,23 @@ a parameter gets the German text of the entry whose English text is its name -
 looked up by its parameter number first, then by the circuit-1 number, then by
 the English text alone where that is unambiguous.
 
-What each sensor input and relay does is not in the reports; it is in Danfoss'
-application guides and kept in ``SENSOR_ROLES`` / ``RELAY_ROLES`` below.
+What the circuits, sensor inputs, relays and triacs do is derived by fixed
+rules (see ``derive_roles``):
+
+* A circuit with a heat curve (``1n175``) is a heating circuit, one with a hot
+  water setpoint (``1n190``) a hot water circuit.
+* The read-only ``Sx sensor reference`` parameters sit in the group of what the
+  sensor measures: ``Flow temperature_2`` makes ``Sx`` circuit 2's flow.
+  ``S1 sensor`` is the outdoor sensor.
+* Danfoss wires pump ``Px`` to relay ``x`` and motorised valve ``Mx`` to triacs
+  ``2x-1`` (open) and ``2x`` (close). Which pump a ``Px`` is, and which circuit
+  a valve serves, is only in the application guides: ``PUMPS`` and ``VALVES``.
+* A role that would occur twice - two heating circuits each with a flow
+  sensor - is suffixed with its circuit on all of them: ``_circuit_1``,
+  ``_circuit_2``.
+
+Inputs no reference parameter names are taken from the guides, in
+``EXTRA_SENSORS``.
 """
 
 from __future__ import annotations
@@ -45,42 +60,85 @@ NAMESPACE = "{schema.danfoss.com/ecl}"
 
 #: Values a parameter stores to mean "off", one step outside its settable
 #: range and shown as ``OFF`` on the controller. The reports do not mark them,
-#: so they are kept here, by parameter number, as they become known.
+#: so they are kept here, by function - a circuit parameter's last three
+#: digits, the same on every circuit - as they become known.
 OFF_VALUES: dict[int, int] = {
-    12125: 9,  # anti-bacteria desired temperature: 9 = OFF
+    125: 9,  # anti-bacteria desired temperature (1x125): 9 = OFF
 }
 
-#: What the sensor inputs measure, by application family, as the field the
-#: library's Sensors component reads them into. Families not listed use the
-#: library's A237/A337 default. From Danfoss' application guides.
-SENSOR_ROLES: dict[str, dict[int, str]] = {
+
+def off_value(pnu: int) -> int | None:
+    """The "off" value of a circuit parameter, if its function has one."""
+    if not 11000 <= pnu < 17000:
+        return None
+    return OFF_VALUES.get(pnu % 1000)
+
+#: Circuit kinds, by the parameter that marks them (last three digits).
+HEAT_CURVE = 175
+HOT_WATER_SETPOINT = 190
+HEATING = "heating"
+HOT_WATER = "hot_water"
+
+#: What a sensor measures, by the group its reference parameter sits in.
+SENSOR_GROUPS: dict[str, str] = {
+    "Flow temperature": "flow_temperature",
+    "Return limit": "return_temperature",
+    "Room limit": "room_temperature",
+    "Tank temperature": "storage_temperature",
+}
+
+#: Roles that name a hot water circuit's sensor apart from a heating circuit's.
+HOT_WATER_PREFIXED = {"flow_temperature", "return_temperature"}
+
+SENSOR_PARAMETER = re.compile(r"^S(?P<number>\d+) sensor(?: reference)?$")
+
+#: Inputs no reference parameter names, from the application guides.
+EXTRA_SENSORS: dict[str, dict[int, str]] = {
     # Operating guide A266 (VI.KT.X5.02), 2.5.4, subtypes .9 and .10.
     "A266.9": {
-        1: "outdoor_temperature",
         2: "secondary_return_temperature",
-        3: "flow_temperature",
-        4: "hot_water_flow_temperature",
-        5: "return_temperature",
         6: "hot_water_return_temperature",
     },
     "A266.10": {
-        1: "outdoor_temperature",
         2: "secondary_return_temperature",
-        3: "flow_temperature",
-        4: "hot_water_flow_temperature",
-        5: "return_temperature",
         6: "hot_water_return_temperature",
     },
 }
 
-#: What the relays drive, by application family; empty while not known (the
-#: integration then shows them by number). Families not listed use the library's
-#: A237/A337 default.
-RELAY_ROLES: dict[str, dict[int, str]] = {
-    # A266: P1 hot water circulation, P2 heating pump, A1 alarm on relay 4; the
-    # relays of P1 and P2 are only in the installation guide - to be confirmed.
-    "A266.9": {},
-    "A266.10": {},
+#: What each pump ``Px`` is and the circuit it serves, from the guides. Danfoss
+#: wires ``Px`` to relay ``x``.
+PUMPS: dict[str, dict[int, tuple[str, int]]] = {
+    # Operating guide A237/A337 (AQ000086479358de-000502), 2.1 component lists.
+    "A237.1": {
+        1: ("heating_pump", 1),
+        2: ("storage_charge_pump", 2),
+        3: ("circulation_pump", 2),
+    },
+    "A337.2": {
+        1: ("heating_pump", 1),
+        2: ("storage_charge_pump", 2),
+        3: ("circulation_pump", 2),
+    },
+    # Operating guide A266, 2.5.4; relays confirmed on an A266.10 (issue #35).
+    "A266.9": {1: ("circulation_pump", 2), 2: ("heating_pump", 1)},
+    "A266.10": {1: ("circulation_pump", 2), 2: ("heating_pump", 1)},
+    # ECL Tool drawing A367_1 example a.
+    "A367.1": {
+        1: ("heating_pump", 1),
+        2: ("storage_charge_pump", 3),
+        3: ("circulation_pump", 3),
+        5: ("heating_pump", 2),
+    },
+}
+
+#: The circuit each motorised valve ``Mx`` serves, from the guides. Danfoss
+#: wires ``Mx`` to triac ``2x-1`` (open) and ``2x`` (close).
+VALVES: dict[str, dict[int, int]] = {
+    "A237.1": {1: 1},
+    "A337.2": {1: 1},
+    "A266.9": {1: 2, 2: 1},
+    "A266.10": {1: 2, 2: 1},
+    "A367.1": {1: 1, 2: 2},
 }
 
 REPORT_NAME = re.compile(r"^(?P<app>[A-Z]\d+)(?:_(?P<sub>\d+))? V(?P<ver>\d+)$")
@@ -286,6 +344,74 @@ def parameters(root: ET.Element, texts: GermanTexts | None = None) -> list[Param
     return sorted(found.values(), key=lambda p: p.pnu)
 
 
+def circuit_kinds(found: list[Parameter]) -> dict[int, str]:
+    """Each circuit's kind: a heat curve makes it heating, a DHW setpoint hot water."""
+    pnus = {p.pnu for p in found}
+    kinds: dict[int, str] = {}
+    for circuit in range(1, 7):
+        base = 10000 + 1000 * circuit
+        if base + HEAT_CURVE in pnus:
+            kinds[circuit] = HEATING
+        elif base + HOT_WATER_SETPOINT in pnus:
+            kinds[circuit] = HOT_WATER
+    return kinds
+
+
+def numbered(roles: dict[int, tuple[str, int]]) -> dict[int, str]:
+    """Suffix every role that occurs more than once with its circuit."""
+    counts: dict[str, int] = {}
+    for role, _circuit in roles.values():
+        counts[role] = counts.get(role, 0) + 1
+    return {
+        number: f"{role}_circuit_{circuit}" if counts[role] > 1 else role
+        for number, (role, circuit) in sorted(roles.items())
+    }
+
+
+def sensor_roles(
+    app: str, found: list[Parameter], kinds: dict[int, str]
+) -> dict[int, str]:
+    """What each sensor input measures, from the reference parameters' groups."""
+    roles: dict[int, tuple[str, int]] = {}
+    for p in found:
+        match = SENSOR_PARAMETER.match(p.name)
+        if match is None:
+            continue
+        number = int(match["number"])
+        group = GROUP_CIRCUIT.sub("", p.group)
+        if number == 1 and group == "General":
+            roles.setdefault(1, ("outdoor_temperature", 0))
+            continue
+        role = SENSOR_GROUPS.get(group)
+        if role is None:
+            continue
+        if role in HOT_WATER_PREFIXED and kinds.get(p.circuit) == HOT_WATER:
+            role = f"hot_water_{role}"
+        roles.setdefault(number, (role, p.circuit))
+    for number, role in EXTRA_SENSORS.get(app, {}).items():
+        roles.setdefault(number, (role, 0))
+    return numbered(roles)
+
+
+def relay_roles(app: str) -> dict[int, str] | None:
+    """What each relay drives: pump ``Px`` on relay ``x``; None if not known."""
+    pumps = PUMPS.get(app)
+    return None if pumps is None else numbered(dict(pumps))
+
+
+def triac_roles(app: str, kinds: dict[int, str]) -> dict[int, str] | None:
+    """What each triac drives: valve ``Mx`` opens on ``2x-1``, closes on ``2x``."""
+    valves = VALVES.get(app)
+    if valves is None:
+        return None
+    roles: dict[int, tuple[str, int]] = {}
+    for valve, circuit in valves.items():
+        prefix = "hot_water_" if kinds.get(circuit) == HOT_WATER else ""
+        roles[2 * valve - 1] = (f"{prefix}valve_open", circuit)
+        roles[2 * valve] = (f"{prefix}valve_close", circuit)
+    return numbered(roles)
+
+
 def module_text(
     name: str, root: ET.Element, member: str, texts: GermanTexts | None = None
 ) -> tuple[str, str]:
@@ -318,11 +444,16 @@ def module_text(
         f"    version={version},",
         f"    ecl_types={ecl_types!r},",
     ]
-    roles = []
-    if app in SENSOR_ROLES:
-        roles.append(("sensors", SENSOR_ROLES[app]))
-    if app in RELAY_ROLES:
-        roles.append(("relays", RELAY_ROLES[app]))
+    found = parameters(root, texts)
+    kinds = circuit_kinds(found)
+    relays = relay_roles(app)
+    roles: list[tuple[str, dict[int, str]]] = [
+        ("circuits", kinds),
+        ("sensors", sensor_roles(app, found, kinds)),
+        ("relays", {} if relays is None else relays),
+    ]
+    if (triacs := triac_roles(app, kinds)) is not None:
+        roles.append(("triacs", triacs))
     for attribute, mapping in roles:
         if not mapping:
             lines.append(f"    {attribute}={{}},")
@@ -331,8 +462,8 @@ def module_text(
         lines += [f'        {number}: "{role}",' for number, role in mapping.items()]
         lines.append("    },")
     lines.append("    parameters={")
-    for p in parameters(root, texts):
-        off = OFF_VALUES.get(p.pnu)
+    for p in found:
+        off = off_value(p.pnu)
         fields = [
             _literal(p.group),
             _literal(p.name),
@@ -382,6 +513,44 @@ def module_text(
     return key, "\n".join(lines)
 
 
+def write_groups(source: Path) -> None:
+    """Write the groups' display names, English and German, without circuit."""
+    raw = read_member(source, "Language/Group texts.txt")
+    text = (
+        raw.decode("utf-16") if raw[:2] in (b"\xff\xfe", b"\xfe\xff") else raw.decode()
+    )
+    lines = text.splitlines()
+    header = lines[0].split("\t")
+    name, german = header.index("Name"), header.index("Text_German")
+    groups: dict[str, tuple[str, str]] = {}
+    for line in lines[1:]:
+        cells = line.split("\t")
+        if len(cells) <= german or not cells[name].strip():
+            continue
+        english = GROUP_CIRCUIT.sub("", cells[name].strip())
+        groups.setdefault(
+            english,
+            (english, GROUP_CIRCUIT.sub("", cells[german].strip()).strip() or english),
+        )
+    out = [
+        '"""The ECL Tool\'s parameter groups, as the controller\'s menus name them.',
+        "",
+        "Generated by ``scripts/import-ecl-tool`` from ``Language/Group texts.txt``.",
+        "Do not edit by hand.",
+        '"""',
+        "",
+        "#: English and German display name, by group without its circuit suffix.",
+        "GROUP_NAMES: dict[str, tuple[str, str]] = {",
+        *(
+            f"    {_literal(key)}: ({_literal(en)}, {_literal(de)}),"
+            for key, (en, de) in sorted(groups.items())
+        ),
+        "}",
+        "",
+    ]
+    (TARGET / "groups.py").write_text("\n".join(out), encoding="utf-8")
+
+
 def write_catalogue() -> None:
     """List every profile module in the package's catalogue."""
     keys = sorted(
@@ -420,6 +589,9 @@ def main() -> None:
         key, text = module_text(name, root, member, texts)
         (TARGET / f"{key}.py").write_text(text, encoding="utf-8")
         print(f"wrote {key}.py")
+    if args.reports:
+        write_groups(args.source)
+        print("wrote groups.py")
     write_catalogue()
     print("wrote catalog.py")
 

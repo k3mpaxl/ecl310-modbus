@@ -58,6 +58,33 @@ device.info.application                     # "A337.2 V02"
 
 With a profile, the device reads only the parameters the application has.
 
+### Circuits, sensors, pumps and valves
+
+A profile also says what the application's circuits, inputs and outputs are,
+derived from the report by fixed rules in `scripts/import-ecl-tool`:
+
+* `profile.circuits`, e.g. `{1: "heating", 2: "heating", 3: "hot_water"}` on
+  A367.1: a heat curve (`1n175`) makes circuit n heating, a hot water setpoint
+  (`1n190`) hot water.
+* `profile.sensors`: the read-only `Sx sensor reference` parameters sit in the
+  group of what `Sx` measures (*Flow temperature_2* - circuit 2's flow).
+* `profile.relays` / `profile.triacs`: Danfoss wires pump `Px` to relay `x` and
+  valve `Mx` to triacs `2x-1`/`2x`; what each `Px` is comes from the guides.
+* A role occurring on two circuits is suffixed on both: `flow_temperature_circuit_1`.
+
+The device builds one sub-system per circuit (`device.circuits`). Danfoss
+numbers every circuit alike - the last three digits say what a parameter is,
+the thousands which circuit - so `HeatingCircuit` (declared for circuit 1) and
+`HotWater` (circuit 2) are moved to any other circuit by
+`circuit_component()`:
+
+```python
+device = Ecl310(unit, application=PROFILES["a367_1_v04"])
+[c.component for c in device.circuits]   # ["heating_1", "heating_2", "hot_water"]
+device.heating_2.summer_cut_off          # parameter 12179
+profile.menu_name(12179, "de")           # "Optimierung > Sommer- Aus"
+```
+
 Detection first asks the controller: it reports its application in PNU
 2060-2063 (`detection.reported`, e.g. `"A237.1 V04"`). A controller that reports
 an application without a profile here gets `detection.application is None`.

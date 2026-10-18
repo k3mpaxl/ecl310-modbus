@@ -18,7 +18,14 @@ reports as they are called inside it (``Reports/<name>.xml``). Run it again
 with no report names to only rebuild the catalogue.
 
 The reports come from outside this repository: they are read straight out of
-the zip, never unpacked, and only their attributes are used.
+the zip, never unpacked, and only their attributes are used. The German display
+texts come from the tool's language table (``Language/ECL7Gen languages Db.txt``):
+a parameter gets the German text of the entry whose English text is its name -
+looked up by its parameter number first, then by the circuit-1 number, then by
+the English text alone where that is unambiguous.
+
+What each sensor input and relay does is not in the reports; it is in Danfoss'
+application guides and kept in ``SENSOR_ROLES`` / ``RELAY_ROLES`` below.
 """
 
 from __future__ import annotations
@@ -43,6 +50,39 @@ OFF_VALUES: dict[int, int] = {
     12125: 9,  # anti-bacteria desired temperature: 9 = OFF
 }
 
+#: What the sensor inputs measure, by application family, as the field the
+#: library's Sensors component reads them into. Families not listed use the
+#: library's A237/A337 default. From Danfoss' application guides.
+SENSOR_ROLES: dict[str, dict[int, str]] = {
+    # Operating guide A266 (VI.KT.X5.02), 2.5.4, subtypes .9 and .10.
+    "A266.9": {
+        1: "outdoor_temperature",
+        2: "secondary_return_temperature",
+        3: "flow_temperature",
+        4: "hot_water_flow_temperature",
+        5: "return_temperature",
+        6: "hot_water_return_temperature",
+    },
+    "A266.10": {
+        1: "outdoor_temperature",
+        2: "secondary_return_temperature",
+        3: "flow_temperature",
+        4: "hot_water_flow_temperature",
+        5: "return_temperature",
+        6: "hot_water_return_temperature",
+    },
+}
+
+#: What the relays drive, by application family; empty while not known (the
+#: integration then shows them by number). Families not listed use the library's
+#: A237/A337 default.
+RELAY_ROLES: dict[str, dict[int, str]] = {
+    # A266: P1 hot water circulation, P2 heating pump, A1 alarm on relay 4; the
+    # relays of P1 and P2 are only in the installation guide - to be confirmed.
+    "A266.9": {},
+    "A266.10": {},
+}
+
 REPORT_NAME = re.compile(r"^(?P<app>[A-Z]\d+)(?:_(?P<sub>\d+))? V(?P<ver>\d+)$")
 PROFILE_MODULE = re.compile(r"^[a-z]\d+(?:_\d+)?_v\d+$")
 LINE_LENGTH = 88
@@ -62,6 +102,119 @@ class Parameter:
     maximum: int | None
     default: int | None
     writable: bool
+    circuit: int = 0
+    name_de: str | None = None
+    options: tuple[tuple[int, str], ...] = ()
+
+
+GROUP_CIRCUIT = re.compile(r"_(?P<circuit>\d+)$")
+OPTION = re.compile(r"(?P<value>-?\d+)\s*=\s*(?P<text>[^;]+)")
+
+
+def circuit_of(group: str) -> int:
+    """``Flow temperature_1`` belongs to circuit 1; ``Input_config`` to none."""
+    match = GROUP_CIRCUIT.search(group)
+    return int(match["circuit"]) if match else 0
+
+
+def options_of(description: str | None) -> tuple[tuple[int, str], ...]:
+    """``1=Pt1000; 2=0-10 volt`` lists what the raw values mean."""
+    if not description:
+        return ()
+    found = [(int(m["value"]), m["text"].strip()) for m in OPTION.finditer(description)]
+    return tuple(found) if len(found) >= 2 else ()
+
+
+class GermanTexts:
+    """The display texts of the tool's language table, English to German."""
+
+    def __init__(self, raw: str) -> None:
+        lines = raw.splitlines()
+        header = lines[0].split("\t")
+        english, german = header.index("Text_English"), header.index("Text_German")
+        self.by_id: dict[int, tuple[str, str]] = {}
+        by_text: dict[str, set[str]] = {}
+        for line in lines[3:]:
+            cells = line.split("\t")
+            if len(cells) <= german or not cells[0].strip().isdigit():
+                continue
+            pair = (cells[english].strip(), cells[german].strip())
+            if not all(pair):
+                continue
+            self.by_id[int(cells[0])] = pair
+            by_text.setdefault(pair[0], set()).add(pair[1])
+        self.by_text = {
+            en: next(iter(de)) for en, de in by_text.items() if len(de) == 1
+        }
+
+    def german(self, pnu: int, english: str) -> str | None:
+        """The German text for parameter ``pnu`` named ``english``, if found.
+
+        A circuit parameter's own number is its text ID, even where the report
+        words its name differently from the display (11180 "Comfort room T" is
+        "T-Komfort Soll"). Below 10000 text IDs are reused for other texts, so
+        there - and for the circuit-1 fallback - the English text must match.
+        """
+        if schedule := SCHEDULE_NAME.match(english):
+            day = WEEKDAYS_DE[schedule["day"]]
+            state = "Ein" if schedule["state"] == "ON" else "Aus"
+            return f"{day} P{schedule['period']} {state}"
+        if english in NAMES_DE:
+            return NAMES_DE[english]
+        if pnu >= 10000 and (pair := self.by_id.get(pnu)):
+            return pair[1]
+        for text_id in (pnu, 11000 + pnu % 1000):
+            pair = self.by_id.get(text_id)
+            if pair and pair[0] == english:
+                return pair[1]
+        return self.by_text.get(english)
+
+
+#: German names for report names the language table has no display text for.
+#: Short codes (Xp, Tn, X1..Y6) are the controller's own and stay as they are.
+NAMES_DE: dict[str, str] = {
+    "Holiday Status": "Ferien Status",
+    "Holiday Start Day": "Ferien Start Tag",
+    "Holiday Start Month": "Ferien Start Monat",
+    "Holiday Start Year": "Ferien Start Jahr",
+    "Holiday End Day": "Ferien Ende Tag",
+    "Holiday End Month": "Ferien Ende Monat",
+    "Holiday End Year": "Ferien Ende Jahr",
+    "MinOutdoorTemp": "Min. Außentemp.",
+    "MinHourTime": "Min. Außentemp. Stunde",
+    "MinMinuteTime": "Min. Außentemp. Minute",
+    "MaxOutdoorTemp": "Max. Außentemp.",
+    "MaxHourTime": "Max. Außentemp. Stunde",
+    "MaxMinuteTime": "Max. Außentemp. Minute",
+    "OutdoorTrend": "Außentemp. Trend",
+    "Past Hour": "Letzte Stunde",
+    "Total Hour": "Stunden gesamt",
+    "Reference place": "Referenzort",
+}
+for _n in range(1, 7):
+    NAMES_DE[f"Circuit {_n} status"] = f"Kreis {_n} Status"
+for _n in range(1, 19):
+    for _prefix in ("", "ECA 32 "):
+        NAMES_DE[f"{_prefix}Config type S{_n}"] = f"{_prefix}Konfig. Typ S{_n}"
+        NAMES_DE[f"{_prefix}Config option S{_n}"] = f"{_prefix}Konfig. Option S{_n}"
+    NAMES_DE[f"S{_n} sensor"] = f"Fühler S{_n}"
+    NAMES_DE[f"S{_n} sensor reference"] = f"Fühler S{_n} Referenz"
+for _n in range(1, 9):
+    NAMES_DE[f"H-Estrich point Y{_n}"] = f"Estrich Punkt Y{_n}"
+
+SCHEDULE_NAME = re.compile(
+    r"^(?P<day>Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday) "
+    r"P(?P<period>\d) (?P<state>ON|OFF)$"
+)
+WEEKDAYS_DE = {
+    "Monday": "Montag",
+    "Tuesday": "Dienstag",
+    "Wednesday": "Mittwoch",
+    "Thursday": "Donnerstag",
+    "Friday": "Freitag",
+    "Saturday": "Samstag",
+    "Sunday": "Sonntag",
+}
 
 
 def _literal(value: object) -> str:
@@ -73,6 +226,17 @@ def _literal(value: object) -> str:
 
 def _int(value: str | None) -> int | None:
     return None if value in (None, "") else int(value)
+
+
+def read_member(source: Path, member: str) -> bytes:
+    """Return one file of the ECL Tool zip or folder."""
+    if source.is_dir():
+        return (source / member).read_bytes()
+    with zipfile.ZipFile(source) as archive:
+        matches = [n for n in archive.namelist() if n.endswith(member)]
+        if len(matches) != 1:
+            sys.exit(f"{member} not found in {source}")
+        return archive.read(matches[0])
 
 
 def read_report(source: Path, name: str) -> tuple[ET.Element, str]:
@@ -89,7 +253,7 @@ def read_report(source: Path, name: str) -> tuple[ET.Element, str]:
     return ET.fromstring(raw.decode("utf-16")), member
 
 
-def parameters(root: ET.Element) -> list[Parameter]:
+def parameters(root: ET.Element, texts: GermanTexts | None = None) -> list[Parameter]:
     """Every parameter in a report, once each, by parameter number."""
     found: dict[int, Parameter] = {}
     for group in root.iter(f"{NAMESPACE}Group"):
@@ -112,12 +276,19 @@ def parameters(root: ET.Element) -> list[Parameter]:
                     maximum=_int(attrs.get("Max")),
                     default=_int(attrs.get("Default_val")),
                     writable=attrs.get("Writable") == "TRUE",
+                    circuit=circuit_of(group_name),
+                    name_de=(
+                        texts.german(pnu, (param.text or "").strip()) if texts else None
+                    ),
+                    options=options_of(attrs.get("Descrip")),
                 ),
             )
     return sorted(found.values(), key=lambda p: p.pnu)
 
 
-def module_text(name: str, root: ET.Element, member: str) -> tuple[str, str]:
+def module_text(
+    name: str, root: ET.Element, member: str, texts: GermanTexts | None = None
+) -> tuple[str, str]:
     """Return the profile module's name and source for report ``name``."""
     match = REPORT_NAME.match(name)
     if match is None:
@@ -146,9 +317,21 @@ def module_text(name: str, root: ET.Element, member: str) -> tuple[str, str]:
         f'    application="{app}",',
         f"    version={version},",
         f"    ecl_types={ecl_types!r},",
-        "    parameters={",
     ]
-    for p in parameters(root):
+    roles = []
+    if app in SENSOR_ROLES:
+        roles.append(("sensors", SENSOR_ROLES[app]))
+    if app in RELAY_ROLES:
+        roles.append(("relays", RELAY_ROLES[app]))
+    for attribute, mapping in roles:
+        if not mapping:
+            lines.append(f"    {attribute}={{}},")
+            continue
+        lines.append(f"    {attribute}={{")
+        lines += [f'        {number}: "{role}",' for number, role in mapping.items()]
+        lines.append("    },")
+    lines.append("    parameters={")
+    for p in parameters(root, texts):
         off = OFF_VALUES.get(p.pnu)
         fields = [
             _literal(p.group),
@@ -163,6 +346,13 @@ def module_text(name: str, root: ET.Element, member: str) -> tuple[str, str]:
         ]
         if off is not None:
             fields.append(f"off={off}")
+        if p.circuit:
+            fields.append(f"circuit={p.circuit}")
+        if p.name_de and p.name_de != p.name:
+            fields.append(f"name_de={_literal(p.name_de)}")
+        if p.options:
+            pairs = ", ".join(f"{value}: {_literal(text)}" for value, text in p.options)
+            fields.append(f"options={{{pairs}}}")
         # Laid out the way the formatter would, so the output passes as is.
         arguments = ", ".join(fields)
         line = f"        {p.pnu}: Parameter({arguments}),"
@@ -176,7 +366,17 @@ def module_text(name: str, root: ET.Element, member: str) -> tuple[str, str]:
             ]
         else:
             lines.append(f"        {p.pnu}: Parameter(")
-            lines.extend(f"            {field}," for field in fields)
+            for field in fields:
+                if len(f"            {field},") <= LINE_LENGTH or not p.options:
+                    lines.append(f"            {field},")
+                    continue
+                # Only the options grow this wide: one value per line.
+                lines.append("            options={")
+                lines += [
+                    f"                {value}: {_literal(text)},"
+                    for value, text in p.options
+                ]
+                lines.append("            },")
             lines.append("        ),")
     lines += ["    },", ")", ""]
     return key, "\n".join(lines)
@@ -211,9 +411,13 @@ def main() -> None:
     parser.add_argument("source", type=Path, help="ECL Tool zip or folder")
     parser.add_argument("reports", nargs="*", help='report names, e.g. "A237_1 V04"')
     args = parser.parse_args()
+    texts = None
+    if args.reports:
+        raw = read_member(args.source, "Language/ECL7Gen languages Db.txt")
+        texts = GermanTexts(raw.decode("utf-16"))
     for name in args.reports:
         root, member = read_report(args.source, name)
-        key, text = module_text(name, root, member)
+        key, text = module_text(name, root, member, texts)
         (TARGET / f"{key}.py").write_text(text, encoding="utf-8")
         print(f"wrote {key}.py")
     write_catalogue()

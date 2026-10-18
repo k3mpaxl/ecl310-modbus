@@ -86,13 +86,28 @@ runs. `Ecl310.async_probe()` reads it too.
 | Profile | Application | Version |
 | :------ | :---------- | :------ |
 | `a237_1_v04` | A237.1 | V04 |
+| `a266_10_v03` | A266.10 | V03 |
 | `a337_2_v02` | A337.2 | V02 |
+
+Each parameter carries the following, for consumers that want to label or
+group what they show:
+
+* its circuit (`1` heating, `2` hot water, `0` controller-wide)
+* the controller display's German text (`parameter.display_name("de")`, e.g.
+  "Heizkurve")
+* the meaning of its raw values, where the report lists them
+
+A profile also says what the sensor inputs measure (`sensors`) and what the
+relays drive (`relays`). The device reads the sensors accordingly, so on
+A266.10 `S4` is the hot water flow and `S6` the hot water return.
+`device.relay_assignments` is `None` while an application's relays are not
+known.
 
 The profiles are generated from the reports in Danfoss' ECL Tool - only the
 derived parameter metadata, not the reports themselves:
 
 ```sh
-scripts/import-ecl-tool "ECL Tool.zip" "A237_1 V04" "A337_2 V02"
+scripts/import-ecl-tool "ECL Tool.zip" "A237_1 V04" "A337_2 V02" "A266_10 V03"
 ```
 
 ## Verified against

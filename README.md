@@ -65,6 +65,20 @@ Only a controller that reports nothing is probed: a handful of parameters that
 tell the known applications apart are read one by one, and the profiles are
 ranked by how many answers each predicts wrongly.
 
+## What the controller is working with
+
+Besides its settings, the controller exposes the values it computes. They are
+read-only, hundredths of a degree, and `None` when there is no value
+(Danfoss VI.LG.V5.02, 9.1):
+
+```python
+device.heating.desired_flow_temperature      # PNU 11253, the S3 reference
+device.heating.filtered_outdoor_temperature  # PNU 11100, what summer cut-off uses
+device.heating.return_limit_in_force         # PNU 11255, the S5 reference
+device.hot_water.desired_tank_temperature    # PNU 12256, S6 reference (A237/A337)
+device.hot_water.desired_flow_temperature    # PNU 12254, S4 reference (A266)
+```
+
 ## Identity
 
 The controller reports what it is (Danfoss VI.LG.V5.02, §6.12):
